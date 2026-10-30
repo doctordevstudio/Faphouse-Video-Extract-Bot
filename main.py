@@ -12,14 +12,17 @@ VERCEL_API_URL = os.environ.get("VERCEL_API_URL")
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL")
 PORT = int(os.environ.get("PORT", 5000))
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# CRITICAL FIX: threaded=False ensures Gunicorn doesn't kill the handler thread before it finishes.
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
 
 DOWNLOAD_CACHE = {}
 
-# SET WEBHOOK IN GLOBAL SCOPE FOR GUNICORN
+# Set Webhook globally so it registers when Gunicorn boots the worker
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 if RENDER_URL:
+    # Ensure there's no double slash in the URL
+    RENDER_URL = RENDER_URL.rstrip('/')
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
@@ -96,10 +99,10 @@ def handle_download(call):
         "<b>Available Qualities (Tap to copy):</b>\n\n"
     )
 
-    if video_data['master']:
+    if video_data.get('master'):
         text += f"Master (Auto):\n`{video_data['master']}`\n\n"
 
-    for res, link in video_data['streams'].items():
+    for res, link in video_data.get('streams', {}).items():
         text += f"{res}p:\n`{link}`\n\n"
 
     bot.send_message(call.message.chat.id, text, parse_mode="HTML", disable_web_page_preview=True)
@@ -107,12 +110,11 @@ def handle_download(call):
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    return 'Forbidden', 403
+    # Simplified JSON decoding to avoid strict content-type header issues
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return 'OK', 200
 
 @app.route('/')
 def index():
