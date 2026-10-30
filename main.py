@@ -10,6 +10,7 @@ from flask import Flask, request
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 VERCEL_API_URL = os.environ.get("VERCEL_API_URL")
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL")
+TG_ADMIN_CHAT_ID = os.environ.get("TG_ADMIN_CHAT_ID")
 PORT = int(os.environ.get("PORT", 5000))
 
 # threaded=False is required for Render/Gunicorn to properly reply to webhooks
@@ -17,6 +18,7 @@ bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
 
 DOWNLOAD_CACHE = {}
+KNOWN_USERS = set()  # Tracks users who started the bot to avoid duplicate admin alerts
 
 # Set Webhook globally so it registers when Gunicorn boots the worker
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
@@ -26,17 +28,63 @@ if RENDER_URL:
     time.sleep(1)
     bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
 
+def notify_admin_new_user(user):
+    if not TG_ADMIN_CHAT_ID:
+        return
+        
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    username = f"@{user.username}" if user.username else "No Username"
+    
+    caption = (
+        f"🆕 <b>New User Started Bot</b>\n\n"
+        f"👤 <b>Name:</b> {full_name}\n"
+        f"📛 <b>Username:</b> {username}\n"
+        f"🆔 <b>Chat ID:</b> <code>{user.id}</code>"
+    )
+    
+    try:
+        photos = bot.get_user_profile_photos(user.id)
+        if photos.total_count > 0:
+            photo_id = photos.photos[0][-1].file_id
+            bot.send_photo(TG_ADMIN_CHAT_ID, photo=photo_id, caption=caption, parse_mode="HTML")
+        else:
+            bot.send_message(TG_ADMIN_CHAT_ID, text=caption, parse_mode="HTML")
+    except Exception as e:
+        print(f"Admin notification failed: {e}")
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    user_id = message.from_user.id
+    
+    if user_id not in KNOWN_USERS:
+        KNOWN_USERS.add(user_id)
+        notify_admin_new_user(message.from_user)
+        
     bot.reply_to(message, "👋 Welcome! Send me a Faphouse URL to extract the video.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_url(message):
     url = message.text.strip()
+    user = message.from_user
     
     if not re.search(r'faphouse\.com|faphouse2\.com', url):
         bot.reply_to(message, "❌ Invalid URL. Only faphouse.com and faphouse2.com are supported.")
         return
+
+    # Notify admin about the link extraction
+    if TG_ADMIN_CHAT_ID:
+        full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        username = f"@{user.username}" if user.username else "No Username"
+        admin_alert = (
+            f"📥 <b>Video Extraction Requested</b>\n\n"
+            f"👤 <b>By:</b> {full_name} ({username})\n"
+            f"🆔 <b>Chat ID:</b> <code>{user.id}</code>\n"
+            f"🔗 <b>Link:</b> {url}"
+        )
+        try:
+            bot.send_message(TG_ADMIN_CHAT_ID, text=admin_alert, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception:
+            pass
 
     msg = bot.reply_to(message, "⏳ Extracting video data...")
 
@@ -53,7 +101,6 @@ def handle_url(message):
         duration = data.get("duration", "00:00")
         thumb = data.get("thumbnail_url")
         
-        # Clean URLs to prevent stray single/double quotes causing playback or download failures
         master_url = data.get("hls_master_url")
         if master_url:
             master_url = master_url.strip("'\" ")
@@ -86,7 +133,7 @@ def handle_url(message):
         else:
             bot.edit_message_text(caption, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="HTML", reply_markup=markup)
 
-    except Exception as e:
+    except Exception:
         bot.edit_message_text("❌ Failed to communicate with extraction server.", chat_id=message.chat.id, message_id=msg.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('dl_'))
@@ -106,7 +153,6 @@ def handle_download(call):
         "<b>Available Qualities (Tap to copy):</b>\n\n"
     )
 
-    # Uses HTML <code> tags for tap-to-copy to avoid markdown backtick conflicts
     if video_data.get('master'):
         text += f"Master (Auto):\n<code>{video_data['master']}</code>\n\n"
 
