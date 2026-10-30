@@ -39,7 +39,7 @@ def handle_url(message):
         bot.reply_to(message, "❌ Invalid URL. Only faphouse.com and faphouse2.com are supported.")
         return
 
-    msg = bot.reply_to(message, "⏳ Extracting video data via Vercel...")
+    msg = bot.reply_to(message, "⏳ Extracting video data ...")
 
     try:
         response = requests.get(f"{VERCEL_API_URL}?url={url}", timeout=25)
@@ -80,7 +80,7 @@ def handle_url(message):
             bot.edit_message_text(caption, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="HTML", reply_markup=markup)
 
     except Exception as e:
-        bot.edit_message_text("❌ Failed to communicate with Vercel backend.", chat_id=message.chat.id, message_id=msg.message_id)
+        bot.edit_message_text("❌ Failed to communicate with backend.", chat_id=message.chat.id, message_id=msg.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('dl_'))
 def handle_download(call):
