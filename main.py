@@ -12,7 +12,7 @@ VERCEL_API_URL = os.environ.get("VERCEL_API_URL")
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL")
 PORT = int(os.environ.get("PORT", 5000))
 
-# CRITICAL FIX: threaded=False ensures Gunicorn doesn't kill the handler thread before it finishes.
+# threaded=False is required for Render/Gunicorn to properly reply to webhooks
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
 
@@ -21,7 +21,6 @@ DOWNLOAD_CACHE = {}
 # Set Webhook globally so it registers when Gunicorn boots the worker
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 if RENDER_URL:
-    # Ensure there's no double slash in the URL
     RENDER_URL = RENDER_URL.rstrip('/')
     bot.remove_webhook()
     time.sleep(1)
@@ -39,7 +38,7 @@ def handle_url(message):
         bot.reply_to(message, "❌ Invalid URL. Only faphouse.com and faphouse2.com are supported.")
         return
 
-    msg = bot.reply_to(message, "⏳ Extracting video data ...")
+    msg = bot.reply_to(message, "⏳ Extracting video data...")
 
     try:
         response = requests.get(f"{VERCEL_API_URL}?url={url}", timeout=25)
@@ -53,13 +52,19 @@ def handle_url(message):
         quality = data.get("quality", "HD")
         duration = data.get("duration", "00:00")
         thumb = data.get("thumbnail_url")
+        
+        # Clean URLs to prevent stray single/double quotes causing playback or download failures
         master_url = data.get("hls_master_url")
+        if master_url:
+            master_url = master_url.strip("'\" ")
+            
         streams = data.get("streams", {})
+        clean_streams = {str(res): str(link).strip("'\" ") for res, link in streams.items()}
 
         cache_id = str(uuid.uuid4())[:8]
         DOWNLOAD_CACHE[cache_id] = {
             "master": master_url,
-            "streams": streams
+            "streams": clean_streams
         }
 
         caption = (
@@ -69,8 +74,10 @@ def handle_url(message):
         )
 
         markup = InlineKeyboardMarkup()
-        play_url = f"{CLOUDFLARE_URL}?url={master_url}"
-        markup.add(InlineKeyboardButton("▶️ Play Video", web_app=WebAppInfo(url=play_url)))
+        if master_url:
+            play_url = f"{CLOUDFLARE_URL}?url={master_url}"
+            markup.add(InlineKeyboardButton("▶️ Play Video", web_app=WebAppInfo(url=play_url)))
+            
         markup.add(InlineKeyboardButton("⬇️ Download Video", callback_data=f"dl_{cache_id}"))
 
         if thumb:
@@ -80,7 +87,7 @@ def handle_url(message):
             bot.edit_message_text(caption, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="HTML", reply_markup=markup)
 
     except Exception as e:
-        bot.edit_message_text("❌ Failed to communicate with backend.", chat_id=message.chat.id, message_id=msg.message_id)
+        bot.edit_message_text("❌ Failed to communicate with extraction server.", chat_id=message.chat.id, message_id=msg.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('dl_'))
 def handle_download(call):
@@ -99,22 +106,24 @@ def handle_download(call):
         "<b>Available Qualities (Tap to copy):</b>\n\n"
     )
 
+    # Uses HTML <code> tags for tap-to-copy to avoid markdown backtick conflicts
     if video_data.get('master'):
-        text += f"Master (Auto):\n`{video_data['master']}`\n\n"
+        text += f"Master (Auto):\n<code>{video_data['master']}</code>\n\n"
 
     for res, link in video_data.get('streams', {}).items():
-        text += f"{res}p:\n`{link}`\n\n"
+        text += f"{res}p:\n<code>{link}</code>\n\n"
 
     bot.send_message(call.message.chat.id, text, parse_mode="HTML", disable_web_page_preview=True)
     bot.answer_callback_query(call.id)
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    # Simplified JSON decoding to avoid strict content-type header issues
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return 'OK', 200
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return 'OK', 200
+    return 'Forbidden', 403
 
 @app.route('/')
 def index():
