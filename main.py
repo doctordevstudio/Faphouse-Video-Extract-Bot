@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import time
 import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
@@ -14,8 +15,14 @@ PORT = int(os.environ.get("PORT", 5000))
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Simple in-memory cache to hold streams for the download button callback
 DOWNLOAD_CACHE = {}
+
+# SET WEBHOOK IN GLOBAL SCOPE FOR GUNICORN
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
+if RENDER_URL:
+    bot.remove_webhook()
+    time.sleep(1)
+    bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -46,7 +53,6 @@ def handle_url(message):
         master_url = data.get("hls_master_url")
         streams = data.get("streams", {})
 
-        # Generate unique ID for download callback cache
         cache_id = str(uuid.uuid4())[:8]
         DOWNLOAD_CACHE[cache_id] = {
             "master": master_url,
@@ -60,10 +66,8 @@ def handle_url(message):
         )
 
         markup = InlineKeyboardMarkup()
-        # Play Button opens Telegram Mini App pointing to Cloudflare
         play_url = f"{CLOUDFLARE_URL}?url={master_url}"
         markup.add(InlineKeyboardButton("▶️ Play Video", web_app=WebAppInfo(url=play_url)))
-        # Download Button triggers Telegram callback
         markup.add(InlineKeyboardButton("⬇️ Download Video", callback_data=f"dl_{cache_id}"))
 
         if thumb:
@@ -101,22 +105,18 @@ def handle_download(call):
     bot.send_message(call.message.chat.id, text, parse_mode="HTML", disable_web_page_preview=True)
     bot.answer_callback_query(call.id)
 
-# Webhook Server for Render
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return '!', 200
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    return 'Forbidden', 403
 
 @app.route('/')
 def index():
     return "Bot is running on Render!", 200
 
 if __name__ == "__main__":
-    bot.remove_webhook()
-    # Replace with your actual Render URL
-    # IMPORTANT: Ensure your Render environment variables include RENDER_EXTERNAL_URL (Render sets this automatically usually)
-    RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", f"https://{os.environ.get('RENDER_SERVICE_NAME')}.onrender.com")
-    bot.set_webhook(url=f"{RENDER_URL}/{BOT_TOKEN}")
     app.run(host="0.0.0.0", port=PORT)
